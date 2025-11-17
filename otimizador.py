@@ -151,12 +151,61 @@ def hill_climbing(n, mu, sigma, p, B, k, lambda_val, alpha, beta, max_iter=1000)
 
 # --- 4. ALGORITMO 2: SIMULATED ANNEALING ---
 
-def get_random_neighbor(x, n):
+def get_random_neighbor(x, n, p, B, k, aggressive=True):
+    """
+    Gera vizinho com estratégia mais inteligente:
+    - Modo agressivo: tenta usar mais do orçamento disponível
+    - Pode adicionar/remover múltiplas ações
+    - Considera limites de budget
+    """
     x_neighbor = np.copy(x)
-    i = random.randint(0, n - 1)
-    if random.random() < 0.5: x_neighbor[i] += 1
-    else: x_neighbor[i] -= 1
-    x_neighbor[i] = max(0, x_neighbor[i])
+    
+    if aggressive:
+        # Calcula orçamento disponível
+        current_investment = np.dot(p, x_neighbor)
+        budget_available = B - current_investment
+        
+        # Decide operação com probabilidade baseada no budget disponível
+        if budget_available > 100:  # Se tem muito budget disponível
+            # 70% chance de adicionar, 30% de remover
+            operation = 'add' if random.random() < 0.7 else 'remove'
+        elif budget_available > 0:
+            # 50/50
+            operation = 'add' if random.random() < 0.5 else 'remove'
+        else:
+            # Se está no limite, mais provável remover
+            operation = 'add' if random.random() < 0.3 else 'remove'
+        
+        if operation == 'add':
+            # Escolhe asset aleatório
+            asset_idx = random.randint(0, n - 1)
+            # Adiciona entre 1-3 ações (se couber no orçamento e limite)
+            current_asset_inv = p[asset_idx] * x_neighbor[asset_idx]
+            max_additional = min(
+                3,
+                int((k - current_asset_inv) / p[asset_idx]) if p[asset_idx] > 0 else 0,
+                int(budget_available / p[asset_idx]) if p[asset_idx] > 0 else 0
+            )
+            if max_additional > 0:
+                add_amount = random.randint(1, max(1, max_additional))
+                x_neighbor[asset_idx] += add_amount
+        else:  # remove
+            # Remove de um ativo que tem ações
+            assets_with_shares = np.where(x_neighbor > 0)[0]
+            if len(assets_with_shares) > 0:
+                asset_idx = random.choice(assets_with_shares)
+                remove_amount = random.randint(1, min(3, x_neighbor[asset_idx]))
+                x_neighbor[asset_idx] -= remove_amount
+    else:
+        # Modo original (simples)
+        i = random.randint(0, n - 1)
+        if random.random() < 0.5:
+            x_neighbor[i] += 1
+        else:
+            x_neighbor[i] -= 1
+        x_neighbor[i] = max(0, x_neighbor[i])
+    
+    x_neighbor = np.maximum(0, x_neighbor)
     return x_neighbor
 
 def simulated_annealing(n, mu, sigma, p, B, k, lambda_val, alpha, beta, 
@@ -170,7 +219,7 @@ def simulated_annealing(n, mu, sigma, p, B, k, lambda_val, alpha, beta,
     
     for i in range(max_iter):
         if T <= T_final: break
-        new_x = get_random_neighbor(current_x, n)
+        new_x = get_random_neighbor(current_x, n, p, B, k, aggressive=True)
         new_fitness = calculate_fitness(new_x, mu, sigma, p, B, k, lambda_val, alpha, beta)
         delta_fitness = new_fitness - current_fitness
         
@@ -251,11 +300,11 @@ def genetic_algorithm(n, mu, sigma, p, B, k, lambda_val, alpha, beta,
 
 # --- 6. ALGORITMO 4: TABU SEARCH (NOVO) ---
 
-def get_neighbors_ts(x, n, n_neighbors):
+def get_neighbors_ts(x, n, n_neighbors, p, B, k):
     """ Gera um conjunto de vizinhos para o Tabu Search """
     neighbors = []
     for _ in range(n_neighbors):
-        neighbors.append(get_random_neighbor(x, n)) # Reutiliza a função do SA
+        neighbors.append(get_random_neighbor(x, n, p, B, k, aggressive=True))
     return neighbors
 
 def tabu_search(n, mu, sigma, p, B, k, lambda_val, alpha, beta,
@@ -272,7 +321,7 @@ def tabu_search(n, mu, sigma, p, B, k, lambda_val, alpha, beta,
     tabu_list = deque(maxlen=tabu_tenure) 
     
     for i in range(max_iter):
-        neighbors = get_neighbors_ts(current_x, n, n_neighbors)
+        neighbors = get_neighbors_ts(current_x, n, n_neighbors, p, B, k)
         
         best_neighbor_x = None
         best_neighbor_fitness = -np.inf
@@ -292,7 +341,7 @@ def tabu_search(n, mu, sigma, p, B, k, lambda_val, alpha, beta,
         if best_neighbor_x is None:
             # Todos os vizinhos explorados estão na lista tabu e não são melhores
             # Damos um passo aleatório para sair
-            current_x = get_random_neighbor(current_x, n)
+            current_x = get_random_neighbor(current_x, n, p, B, k, aggressive=True)
             current_fitness = calculate_fitness(current_x, mu, sigma, p, B, k, lambda_val, alpha, beta)
         else:
             current_x = best_neighbor_x
@@ -639,10 +688,542 @@ def plot_summary_table(results_data, mu, sigma, p, B, k):
     print("\nGráfico 'tabela_resumo.png' guardado.")
 
 
+def plot_radar_chart(results_data, mu, sigma, p, B, k, n):
+    """ (NEW) Radar chart comparando algoritmos em múltiplas dimensões """
+    from math import pi
+    
+    # Prepare metrics (normalized to 0-1 scale for comparison)
+    metrics = ['Fitness', 'Retorno', 'Diversif.', 'Budget\nUsage', 
+               'Baixo\nRisco', 'Sharpe']
+    num_vars = len(metrics)
+    
+    # Calculate values for each algorithm
+    algo_values = []
+    algo_names = []
+    
+    for name, x, fitness in results_data:
+        ret = calculate_return(x, mu)
+        risk = calculate_risk(x, sigma)
+        sharpe = ret / np.sqrt(risk) if risk > 0 else 0
+        investment = np.dot(p, x)
+        n_assets = np.sum(x > 0)
+        
+        algo_names.append(name)
+        algo_values.append([fitness, ret, n_assets, investment, risk, sharpe])
+    
+    # Normalize each metric to 0-1 scale
+    algo_values = np.array(algo_values)
+    normalized = np.zeros_like(algo_values)
+    
+    for i in range(algo_values.shape[1]):
+        col = algo_values[:, i]
+        if i == 4:  # Risk - lower is better, so invert
+            max_val, min_val = col.max(), col.min()
+            if max_val != min_val:
+                normalized[:, i] = 1 - (col - min_val) / (max_val - min_val)
+            else:
+                normalized[:, i] = 0.5
+        else:  # Higher is better
+            max_val, min_val = col.max(), col.min()
+            if max_val != min_val:
+                normalized[:, i] = (col - min_val) / (max_val - min_val)
+            else:
+                normalized[:, i] = 0.5
+    
+    # Create radar chart
+    angles = [n / float(num_vars) * 2 * pi for n in range(num_vars)]
+    angles += angles[:1]
+    
+    fig, ax = plt.subplots(figsize=(12, 12), subplot_kw=dict(projection='polar'))
+    
+    colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6']
+    
+    for idx, (name, values) in enumerate(zip(algo_names, normalized)):
+        values = list(values) + [values[0]]  # Complete the circle
+        ax.plot(angles, values, 'o-', linewidth=2.5, 
+               label=name, color=colors[idx % len(colors)])
+        ax.fill(angles, values, alpha=0.15, color=colors[idx % len(colors)])
+    
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(metrics, fontsize=11, fontweight='bold')
+    ax.set_ylim(0, 1)
+    ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
+    ax.set_yticklabels(['0.2', '0.4', '0.6', '0.8', '1.0'], fontsize=9)
+    ax.grid(True, linestyle='--', alpha=0.7)
+    
+    plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize=11)
+    plt.title('Comparação Multi-Dimensional dos Algoritmos\n'
+             '(Valores Normalizados: 1.0 = Melhor Performance)',
+             fontsize=15, fontweight='bold', pad=30)
+    
+    plt.savefig('radar_comparacao.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print("\nGráfico 'radar_comparacao.png' guardado.")
+
+
+def plot_asset_popularity_heatmap(results_data, tickers, p):
+    """ (NEW) Heatmap mostrando quais ativos são escolhidos por cada algoritmo """
+    # Create matrix: rows = algorithms, columns = assets
+    algo_names = [name for name, _, _ in results_data]
+    n_algos = len(algo_names)
+    n_assets = len(tickers)
+    
+    # Get top assets (those selected by at least one algorithm)
+    asset_matrix = []
+    for name, x, _ in results_data:
+        asset_matrix.append(x)
+    
+    asset_matrix = np.array(asset_matrix)
+    
+    # Find assets that are used by at least one algorithm
+    used_assets = np.any(asset_matrix > 0, axis=0)
+    used_indices = np.where(used_assets)[0]
+    
+    if len(used_indices) > 60:
+        # Too many assets, show only top invested ones
+        total_investment = np.sum(asset_matrix * p, axis=0)
+        top_indices = np.argsort(total_investment)[-60:][::-1]
+    else:
+        top_indices = used_indices
+    
+    # Create filtered matrix
+    filtered_matrix = asset_matrix[:, top_indices]
+    filtered_tickers = [tickers[i] for i in top_indices]
+    
+    # Create heatmap
+    fig, ax = plt.subplots(figsize=(max(18, len(filtered_tickers)*0.35), 10))
+    
+    im = ax.imshow(filtered_matrix, cmap='YlOrRd', aspect='auto')
+    
+    # Set ticks
+    ax.set_xticks(np.arange(len(filtered_tickers)))
+    ax.set_yticks(np.arange(n_algos))
+    ax.set_xticklabels(filtered_tickers, rotation=90, ha='right', fontsize=9)
+    ax.set_yticklabels(algo_names, fontsize=11, fontweight='bold')
+    
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('Número de Ações', rotation=270, labelpad=20, 
+                   fontsize=11, fontweight='bold')
+    
+    # Add values in cells (if not too many)
+    if len(filtered_tickers) <= 40:
+        for i in range(n_algos):
+            for j in range(len(filtered_tickers)):
+                value = filtered_matrix[i, j]
+                if value > 0:
+                    text = ax.text(j, i, int(value),
+                                  ha="center", va="center", 
+                                  color="black" if value < filtered_matrix.max()/2 
+                                  else "white",
+                                  fontsize=8, fontweight='bold')
+    
+    ax.set_title(f'Popularidade dos Ativos: Quais Ações Cada Algoritmo Escolheu\n'
+                f'(Top {len(filtered_tickers)} ativos mais investidos)',
+                fontsize=14, fontweight='bold', pad=15)
+    ax.set_xlabel('Ativo', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Algoritmo', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig('heatmap_popularidade_ativos.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print("\nGráfico 'heatmap_popularidade_ativos.png' guardado.")
+
+
+def plot_convergence_speed(histories):
+    """ (NEW) Análise da velocidade de convergência """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
+    
+    colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6']
+    algo_names = []
+    iterations_to_90 = []
+    iterations_to_95 = []
+    final_fitness = []
+    
+    for idx, (name, history) in enumerate(histories):
+        algo_names.append(name)
+        
+        if len(history) < 2:
+            iterations_to_90.append(0)
+            iterations_to_95.append(0)
+            final_fitness.append(history[0] if len(history) > 0 else 0)
+            continue
+        
+        final_fit = history[-1]
+        final_fitness.append(final_fit)
+        target_90 = final_fit * 0.90
+        target_95 = final_fit * 0.95
+        
+        # Find when it reaches 90% and 95%
+        iter_90 = len(history)
+        iter_95 = len(history)
+        
+        for i, fit in enumerate(history):
+            if fit >= target_90 and iter_90 == len(history):
+                iter_90 = i
+            if fit >= target_95 and iter_95 == len(history):
+                iter_95 = i
+        
+        iterations_to_90.append(iter_90)
+        iterations_to_95.append(iter_95)
+    
+    # Plot 1: Iterations to reach targets
+    x = np.arange(len(algo_names))
+    width = 0.35
+    
+    bars1 = ax1.bar(x - width/2, iterations_to_90, width, 
+                   label='90% do Fitness Final', color='#3498db', 
+                   alpha=0.8, edgecolor='black', linewidth=1.5)
+    bars2 = ax1.bar(x + width/2, iterations_to_95, width,
+                   label='95% do Fitness Final', color='#2ecc71',
+                   alpha=0.8, edgecolor='black', linewidth=1.5)
+    
+    ax1.set_ylabel('Iterações / Gerações', fontweight='bold', fontsize=11)
+    ax1.set_title('Velocidade de Convergência\n(Menos iterações = Mais rápido)',
+                 fontweight='bold', fontsize=13)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(algo_names, rotation=20, ha='right')
+    ax1.legend(loc='best', frameon=True, shadow=True)
+    ax1.grid(axis='y', alpha=0.3)
+    
+    # Add value labels
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            if height > 0:
+                ax1.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{int(height)}',
+                        ha='center', va='bottom', fontsize=9, fontweight='bold')
+    
+    # Plot 2: Convergence efficiency (final fitness / iterations)
+    efficiency = []
+    total_iters = []
+    
+    for idx, (name, history) in enumerate(histories):
+        total_iters.append(len(history))
+        if len(history) > 0:
+            eff = final_fitness[idx] / len(history)
+            efficiency.append(eff)
+        else:
+            efficiency.append(0)
+    
+    bars = ax2.barh(algo_names, efficiency, color=colors, alpha=0.8,
+                   edgecolor='black', linewidth=1.5)
+    
+    ax2.set_xlabel('Eficiência (Fitness / Iteração)', fontweight='bold', fontsize=11)
+    ax2.set_title('Eficiência dos Algoritmos\n(Maior = Melhor aproveitamento)',
+                 fontweight='bold', fontsize=13)
+    ax2.grid(axis='x', alpha=0.3)
+    
+    # Add value labels
+    for bar, val, iters in zip(bars, efficiency, total_iters):
+        width = bar.get_width()
+        ax2.text(width, bar.get_y() + bar.get_height()/2,
+                f' {val:.3f} ({iters} iter)',
+                va='center', fontsize=9, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig('velocidade_convergencia.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print("\nGráfico 'velocidade_convergencia.png' guardado.")
+
+
+def plot_top_assets_analysis(results_data, tickers, p):
+    """ (NEW) Análise dos ativos mais populares """
+    # Aggregate investment across all algorithms
+    total_shares = np.zeros(len(tickers))
+    total_value = np.zeros(len(tickers))
+    selection_count = np.zeros(len(tickers))
+    
+    for name, x, _ in results_data:
+        total_shares += x
+        total_value += x * p
+        selection_count += (x > 0).astype(int)
+    
+    # Get top 20 assets by total value
+    top_indices = np.argsort(total_value)[-20:][::-1]
+    top_tickers = [tickers[i] for i in top_indices]
+    top_values = total_value[top_indices]
+    top_counts = selection_count[top_indices]
+    top_shares = total_shares[top_indices]
+    
+    # Create figure with 2 subplots
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 12))
+    
+    # Plot 1: Investment value
+    colors_grad = plt.cm.viridis(np.linspace(0.3, 0.9, len(top_tickers)))
+    bars1 = ax1.bar(top_tickers, top_values, color=colors_grad,
+                   edgecolor='black', linewidth=1.5, alpha=0.85)
+    
+    ax1.set_ylabel('Valor Total Investido ($)', fontweight='bold', fontsize=12)
+    ax1.set_title('Top 20 Ativos Mais Investidos (Soma de Todos os Algoritmos)',
+                 fontweight='bold', fontsize=14, pad=15)
+    ax1.grid(axis='y', alpha=0.3, linestyle='--')
+    plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
+    
+    # Add value labels
+    for bar, val in zip(bars1, top_values):
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height,
+                f'${val:.0f}',
+                ha='center', va='bottom', fontsize=9, fontweight='bold')
+    
+    # Plot 2: Selection frequency
+    colors_freq = ['#2ecc71' if c == len(results_data) else '#3498db' if c >= len(results_data)/2 else '#e67e22' 
+                   for c in top_counts]
+    bars2 = ax2.bar(top_tickers, top_counts, color=colors_freq,
+                   edgecolor='black', linewidth=1.5, alpha=0.85)
+    
+    ax2.set_ylabel('Número de Algoritmos que Selecionaram', 
+                  fontweight='bold', fontsize=12)
+    ax2.set_xlabel('Ativo', fontweight='bold', fontsize=12)
+    ax2.set_title('Frequência de Seleção dos Top 20 Ativos\n'
+                 '(Verde = Todos | Azul = Maioria | Laranja = Alguns)',
+                 fontweight='bold', fontsize=14, pad=15)
+    ax2.set_ylim(0, len(results_data) + 0.5)
+    ax2.axhline(y=len(results_data), color='red', linestyle='--', 
+               linewidth=2, alpha=0.5, label='Todos os algoritmos')
+    ax2.grid(axis='y', alpha=0.3, linestyle='--')
+    ax2.legend(loc='best')
+    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
+    
+    # Add value labels
+    for bar, val, shares in zip(bars2, top_counts, top_shares):
+        height = bar.get_height()
+        ax2.text(bar.get_x() + bar.get_width()/2., height,
+                f'{int(val)}/{len(results_data)}\n({int(shares)} ações)',
+                ha='center', va='bottom', fontsize=8, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig('top_ativos_analise.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print("\nGráfico 'top_ativos_analise.png' guardado.")
+
+
+def plot_portfolio_composition_comparison(results_data, tickers, p):
+    """ (NEW) Comparação lado-a-lado da composição dos portfólios """
+    # Get top 15 most invested assets across all algorithms
+    total_value = np.zeros(len(tickers))
+    
+    for name, x, _ in results_data:
+        total_value += x * p
+    
+    top_indices = np.argsort(total_value)[-15:][::-1]
+    top_tickers = [tickers[i] for i in top_indices]
+    
+    # Create matrix for stacked bar chart
+    n_algos = len(results_data)
+    n_assets = len(top_tickers)
+    
+    data_matrix = np.zeros((n_assets, n_algos))
+    algo_names = []
+    
+    for algo_idx, (name, x, _) in enumerate(results_data):
+        algo_names.append(name)
+        for asset_idx, ticker_idx in enumerate(top_indices):
+            data_matrix[asset_idx, algo_idx] = x[ticker_idx] * p[ticker_idx]
+    
+    # Create stacked bar chart
+    fig, ax = plt.subplots(figsize=(16, 10))
+    
+    x_pos = np.arange(n_algos)
+    colors = plt.cm.tab20(np.linspace(0, 1, n_assets))
+    
+    bottom = np.zeros(n_algos)
+    
+    for asset_idx in range(n_assets):
+        bars = ax.bar(x_pos, data_matrix[asset_idx], 0.8, 
+                     label=top_tickers[asset_idx],
+                     bottom=bottom, color=colors[asset_idx],
+                     edgecolor='white', linewidth=0.5)
+        bottom += data_matrix[asset_idx]
+    
+    ax.set_ylabel('Valor Investido ($)', fontweight='bold', fontsize=12)
+    ax.set_xlabel('Algoritmo', fontweight='bold', fontsize=12)
+    ax.set_title('Comparação da Composição dos Portfólios\n'
+                '(Top 15 Ativos Mais Investidos)',
+                fontweight='bold', fontsize=15, pad=20)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(algo_names, rotation=15, ha='right', fontsize=11)
+    ax.legend(loc='upper left', bbox_to_anchor=(1, 1), 
+             title='Ativos', fontsize=9, title_fontsize=11)
+    ax.grid(axis='y', alpha=0.3, linestyle='--')
+    
+    # Add total value on top of each bar
+    for i, total in enumerate(bottom):
+        ax.text(i, total, f'${total:.0f}',
+               ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig('composicao_portfolios.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print("\nGráfico 'composicao_portfolios.png' guardado.")
+
+
+def plot_efficient_frontier(results_data, mu, sigma):
+    """ (NEW) Fronteira eficiente aproximada """
+    fig, ax = plt.subplots(figsize=(14, 10))
+    
+    colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6']
+    markers = ['o', 's', '^', 'D', 'v']
+    
+    # Plot algorithm solutions
+    risks = []
+    returns = []
+    
+    for idx, (name, x, fitness) in enumerate(results_data):
+        ret = calculate_return(x, mu)
+        risk = calculate_risk(x, sigma)
+        
+        risks.append(risk)
+        returns.append(ret)
+        
+        ax.scatter(risk, ret, s=400, 
+                  color=colors[idx % len(colors)],
+                  marker=markers[idx % len(markers)],
+                  alpha=0.7, edgecolors='black', linewidths=2.5,
+                  label=name, zorder=5)
+        
+        # Add algorithm name near point
+        ax.annotate(name, xy=(risk, ret),
+                   xytext=(15, 15), textcoords='offset points',
+                   fontsize=10, fontweight='bold',
+                   bbox=dict(boxstyle='round,pad=0.5', 
+                            fc=colors[idx % len(colors)], 
+                            alpha=0.2),
+                   arrowprops=dict(arrowstyle='->', 
+                                  connectionstyle='arc3,rad=0.3',
+                                  color='gray', lw=1.5))
+    
+    # Sort solutions by risk for frontier line
+    sorted_indices = np.argsort(risks)
+    sorted_risks = [risks[i] for i in sorted_indices]
+    sorted_returns = [returns[i] for i in sorted_indices]
+    
+    # Draw approximate efficient frontier
+    ax.plot(sorted_risks, sorted_returns, 'k--', alpha=0.5, 
+           linewidth=2, label='Fronteira Aproximada', zorder=3)
+    
+    # Add reference lines for different return levels
+    if len(risks) > 0:
+        min_risk = min(risks)
+        max_risk = max(risks)
+        risk_range = np.linspace(min_risk * 0.8, max_risk * 1.2, 100)
+        
+        # Constant Sharpe ratio lines
+        for sharpe in [0.5, 1.0, 1.5, 2.0]:
+            ret_line = sharpe * np.sqrt(risk_range)
+            ax.plot(risk_range, ret_line, ':', alpha=0.2, linewidth=1.5,
+                   color='gray')
+            # Label at the end
+            ax.text(risk_range[-1], ret_line[-1], f'S={sharpe}',
+                   fontsize=8, alpha=0.5)
+    
+    ax.set_xlabel('Risco (Variância do Portfólio)', 
+                 fontweight='bold', fontsize=13)
+    ax.set_ylabel('Retorno Esperado Anualizado', 
+                 fontweight='bold', fontsize=13)
+    ax.set_title('Fronteira Eficiente Aproximada\n'
+                'Comparação de Soluções no Espaço Risco-Retorno',
+                fontweight='bold', fontsize=16, pad=20)
+    ax.legend(loc='best', frameon=True, shadow=True, fontsize=11)
+    ax.grid(True, linestyle='--', alpha=0.4)
+    
+    # Add info box
+    info_text = (f'Total de soluções: {len(results_data)}\n'
+                f'Melhor Sharpe: {max([r/np.sqrt(risk) for r, risk in zip(returns, risks) if risk > 0]):.3f}\n'
+                f'Linhas pontilhadas: Sharpe Ratio constante')
+    ax.text(0.02, 0.98, info_text, transform=ax.transAxes,
+           fontsize=10, verticalalignment='top',
+           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    plt.tight_layout()
+    plt.savefig('fronteira_eficiente.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print("\nGráfico 'fronteira_eficiente.png' guardado.")
+
+
+def plot_algorithm_comparison_dashboard(results_data, mu, sigma, p, B, k):
+    """ (NEW) Cria uma tabela visual com resumo estatístico """
+    fig, ax = plt.subplots(figsize=(18, 10))
+    ax.axis('tight')
+    ax.axis('off')
+    
+    # Prepare data for table
+    headers = ['Algoritmo', 'Fitness', 'Retorno', 'Risco', 'Sharpe',
+              'Investimento', '% Budget', 'N° Ativos', 'Violações']
+    
+    table_data = []
+    for name, x, fitness in results_data:
+        ret = calculate_return(x, mu)
+        risk = calculate_risk(x, sigma)
+        sharpe = ret / np.sqrt(risk) if risk > 0 else 0
+        investment = np.dot(p, x)
+        pct_budget = (investment / B) * 100
+        n_assets = np.sum(x > 0)
+        
+        # Check violations
+        budget_viol = max(0, investment - B)
+        individual_invs = p * x
+        limit_viol = np.sum(individual_invs > k)
+        violations = f'{int(limit_viol)} ativos' if limit_viol > 0 else '✓ OK'
+        if budget_viol > 0:
+            violations = f'Budget! {violations}'
+        
+        table_data.append([
+            name,
+            f'{fitness:.2f}',
+            f'{ret:.4f}',
+            f'{risk:.4f}',
+            f'{sharpe:.3f}',
+            f'${investment:.0f}',
+            f'{pct_budget:.1f}%',
+            int(n_assets),
+            violations
+        ])
+    
+    # Create table
+    table = ax.table(cellText=table_data, colLabels=headers,
+                    cellLoc='center', loc='center',
+                    colWidths=[0.15, 0.08, 0.1, 0.1, 0.08,
+                              0.12, 0.09, 0.09, 0.19])
+    
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 2.5)
+    
+    # Style header
+    for i in range(len(headers)):
+        cell = table[(0, i)]
+        cell.set_facecolor('#34495e')
+        cell.set_text_props(weight='bold', color='white', fontsize=11)
+    
+    # Color rows by rank
+    colors_rank = ['#2ecc71', '#3498db', '#f39c12', '#e67e22', '#e74c3c']
+    fitnesses = [fit for _, _, fit in results_data]
+    ranks = np.argsort(np.argsort(fitnesses)[::-1])
+    
+    for i, rank in enumerate(ranks):
+        for j in range(len(headers)):
+            cell = table[(i+1, j)]
+            cell.set_facecolor(colors_rank[rank % len(colors_rank)])
+            cell.set_alpha(0.3)
+            if j == 0:  # Algorithm name
+                cell.set_text_props(weight='bold')
+    
+    plt.suptitle('Tabela Resumo Estatístico de Todos os Algoritmos\n'
+                '(Ordenado por Fitness - Verde = Melhor)',
+                fontsize=16, fontweight='bold', y=0.98)
+    
+    plt.savefig('tabela_resumo.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print("\nGráfico 'tabela_resumo.png' guardado.")
+
+
 def plot_algorithm_comparison_dashboard(results_data, mu, sigma, p, B, k):
     """ (NEW) Cria um dashboard completo comparando todos os algoritmos """
-    fig = plt.figure(figsize=(20, 14))
-    gs = fig.add_gridspec(3, 3, hspace=0.35, wspace=0.3)
+    fig = plt.figure(figsize=(22, 16))
+    gs = fig.add_gridspec(3, 3, hspace=0.45, wspace=0.4)
     
     colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6']
     algo_names = [name for name, _, _ in results_data]
@@ -660,7 +1241,7 @@ def plot_algorithm_comparison_dashboard(results_data, mu, sigma, p, B, k):
     for bar, val in zip(bars, fitnesses):
         width = bar.get_width()
         ax1.text(width, bar.get_y() + bar.get_height()/2,
-                f' {val:.2f}', va='center', fontweight='bold', fontsize=9)
+                f' {val:.1f}', va='center', fontweight='bold', fontsize=8)
     
     # 2. Return Comparison
     ax2 = fig.add_subplot(gs[0, 1])
@@ -674,7 +1255,7 @@ def plot_algorithm_comparison_dashboard(results_data, mu, sigma, p, B, k):
     for bar, val in zip(bars, returns):
         width = bar.get_width()
         ax2.text(width, bar.get_y() + bar.get_height()/2,
-                f' {val:.4f}', va='center', fontweight='bold', fontsize=9)
+                f' {val:.3f}', va='center', fontweight='bold', fontsize=8)
     
     # 3. Risk Comparison
     ax3 = fig.add_subplot(gs[0, 2])
@@ -688,7 +1269,7 @@ def plot_algorithm_comparison_dashboard(results_data, mu, sigma, p, B, k):
     for bar, val in zip(bars, risks):
         width = bar.get_width()
         ax3.text(width, bar.get_y() + bar.get_height()/2,
-                f' {val:.4f}', va='center', fontweight='bold', fontsize=9)
+                f' {val:.2f}', va='center', fontweight='bold', fontsize=8)
     
     # 4. Investment Amount Comparison
     ax4 = fig.add_subplot(gs[1, 0])
@@ -706,8 +1287,8 @@ def plot_algorithm_comparison_dashboard(results_data, mu, sigma, p, B, k):
         width = bar.get_width()
         pct = (val / B) * 100
         ax4.text(width, bar.get_y() + bar.get_height()/2,
-                f' ${val:.0f} ({pct:.1f}%)',
-                va='center', fontweight='bold', fontsize=8)
+                f' ${val:.0f} ({pct:.0f}%)',
+                va='center', fontweight='bold', fontsize=7)
     
     # 5. Number of Assets Used
     ax5 = fig.add_subplot(gs[1, 1])
@@ -721,7 +1302,7 @@ def plot_algorithm_comparison_dashboard(results_data, mu, sigma, p, B, k):
     for bar, val in zip(bars, n_assets):
         width = bar.get_width()
         ax5.text(width, bar.get_y() + bar.get_height()/2,
-                f' {int(val)} ativos', va='center', fontweight='bold', fontsize=9)
+                f' {int(val)}', va='center', fontweight='bold', fontsize=8)
     
     # 6. Sharpe Ratio Comparison (Risk-adjusted return)
     ax6 = fig.add_subplot(gs[1, 2])
@@ -741,7 +1322,7 @@ def plot_algorithm_comparison_dashboard(results_data, mu, sigma, p, B, k):
     for bar, val in zip(bars, sharpe_ratios):
         width = bar.get_width()
         ax6.text(width, bar.get_y() + bar.get_height()/2,
-                f' {val:.3f}', va='center', fontweight='bold', fontsize=9)
+                f' {val:.2f}', va='center', fontweight='bold', fontsize=8)
     
     # 7. Constraint Violations
     ax7 = fig.add_subplot(gs[2, :])
@@ -782,17 +1363,17 @@ def plot_algorithm_comparison_dashboard(results_data, mu, sigma, p, B, k):
         if height > 0:
             ax7.text(bar.get_x() + bar.get_width()/2., height,
                     f'${height:.0f}',
-                    ha='center', va='bottom', fontsize=8, fontweight='bold')
+                    ha='center', va='bottom', fontsize=7, fontweight='bold')
     
     for bar in bars2:
         height = bar.get_height()
         if height > 0:
             ax7.text(bar.get_x() + bar.get_width()/2., height,
                     f'${height:.0f}',
-                    ha='center', va='bottom', fontsize=8, fontweight='bold')
+                    ha='center', va='bottom', fontsize=7, fontweight='bold')
     
     plt.suptitle('Dashboard de Comparação Completa dos Algoritmos',
-                fontsize=18, fontweight='bold', y=0.998)
+                fontsize=18, fontweight='bold', y=0.995)
     
     plt.savefig('dashboard_comparacao.png', dpi=300, bbox_inches='tight')
     plt.close()
@@ -1040,13 +1621,16 @@ if __name__ == "__main__":
         print("A GERAR VISUALIZAÇÕES AVANÇADAS")
         print("="*60)
         
-        print("\n[1/5] Tabela Resumo Estatístico...")
+        print("\n[1/10] Tabela Resumo Estatístico...")
         plot_summary_table(results_data, mu, sigma, p, B, k)
         
-        print("\n[2/5] Dashboard de Comparação Completa...")
+        print("\n[2/10] Radar Chart Multi-Dimensional...")
+        plot_radar_chart(results_data, mu, sigma, p, B, k, n)
+        
+        print("\n[3/10] Dashboard de Comparação Completa...")
         plot_algorithm_comparison_dashboard(results_data, mu, sigma, p, B, k)
         
-        print("\n[3/5] Gráfico de Convergência Detalhado...")
+        print("\n[4/10] Gráfico de Convergência Detalhado...")
         plot_convergence([
             ("Hill Climbing", hc_hist),
             ("Simulated Annealing", sa_hist),
@@ -1055,23 +1639,53 @@ if __name__ == "__main__":
             ("Particle Swarm (PSO)", pso_hist)
         ])
         
-        print("\n[4/5] Análise Risco vs Retorno...")
+        print("\n[5/10] Análise de Velocidade de Convergência...")
+        plot_convergence_speed([
+            ("Hill Climbing", hc_hist),
+            ("Simulated Annealing", sa_hist),
+            ("Genetic Algorithm", ga_hist),
+            ("Tabu Search", ts_hist),
+            ("Particle Swarm (PSO)", pso_hist)
+        ])
+        
+        print("\n[6/10] Fronteira Eficiente...")
+        plot_efficient_frontier(results_data, mu, sigma)
+        
+        print("\n[7/10] Análise Risco vs Retorno...")
         plot_risk_return_scatter(results_data, mu, sigma)
         
+        print("\n[8/10] Heatmap de Popularidade dos Ativos...")
+        plot_asset_popularity_heatmap(results_data, tickers, p)
+        
+        print("\n[9/10] Análise dos Top Ativos...")
+        plot_top_assets_analysis(results_data, tickers, p)
+        
+        print("\n[10/10] Comparação de Composição dos Portfólios...")
+        plot_portfolio_composition_comparison(results_data, tickers, p)
+        
         # --- Gráficos de Alocação (Um conjunto para CADA algoritmo) ---
-        print("\n[5/5] Gráficos de Alocação para CADA algoritmo...")
+        print("\n" + "="*60)
+        print("GRÁFICOS DE ALOCAÇÃO INDIVIDUAL")
+        print("="*60)
         
         for idx, (name, x, fit) in enumerate(results_data, 1):
-            print(f"  [{idx}/{len(results_data)}] Gerando: {name}")
+            print(f"\n[{idx}/{len(results_data)}] Gerando: {name}")
             plot_allocation_charts(x, p, tickers, name, B, k)
         
-        total_graphs = 4 + len(results_data) * 3 + 1  # heatmap included
+        total_graphs = 10 + len(results_data) * 3 + 1  # +1 for heatmap
         print("\n" + "="*60)
         print("✓ EXECUÇÃO CONCLUÍDA COM SUCESSO!")
         print(f"✓ Total de gráficos gerados: {total_graphs}")
         print("✓ Resolução: 300 DPI (alta qualidade)")
         print("="*60)
-        print("\nGráficos gerados:")
+        print("\nNOVOS Gráficos Avançados:")
+        print("  • radar_comparacao.png - Comparação multi-dimensional")
+        print("  • velocidade_convergencia.png - Análise de velocidade")
+        print("  • fronteira_eficiente.png - Fronteira eficiente")
+        print("  • heatmap_popularidade_ativos.png - Popularidade de ativos")
+        print("  • top_ativos_analise.png - Top 20 ativos")
+        print("  • composicao_portfolios.png - Composição lado-a-lado")
+        print("\nGráficos Principais:")
         print("  • tabela_resumo.png - Tabela estatística comparativa")
         print("  • dashboard_comparacao.png - Dashboard completo")
         print("  • convergencia.png - Análise de convergência detalhada")

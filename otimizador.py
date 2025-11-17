@@ -209,7 +209,14 @@ def get_random_neighbor(x, n, p, B, k, aggressive=True):
     return x_neighbor
 
 def simulated_annealing(n, mu, sigma, p, B, k, lambda_val, alpha, beta, 
-                        max_iter=10000, T_initial=1000.0, T_final=0.1, cooling_rate=0.99):
+                        max_iter=10000, T_initial=1000.0, T_final=0.1, 
+                        cooling_rate=0.99, aggressive_neighbors=True):
+    """
+    Simulated Annealing com opção de estratégia de vizinhança.
+    
+    aggressive_neighbors=True: Usa mais budget rapidamente (pode sair da fronteira)
+    aggressive_neighbors=False: Exploração mais conservadora (melhor para Pareto)
+    """
     current_x = np.zeros(n, dtype=int)
     current_fitness = calculate_fitness(current_x, mu, sigma, p, B, k, lambda_val, alpha, beta)
     best_x = current_x
@@ -219,7 +226,7 @@ def simulated_annealing(n, mu, sigma, p, B, k, lambda_val, alpha, beta,
     
     for i in range(max_iter):
         if T <= T_final: break
-        new_x = get_random_neighbor(current_x, n, p, B, k, aggressive=True)
+        new_x = get_random_neighbor(current_x, n, p, B, k, aggressive=aggressive_neighbors)
         new_fitness = calculate_fitness(new_x, mu, sigma, p, B, k, lambda_val, alpha, beta)
         delta_fitness = new_fitness - current_fitness
         
@@ -1070,6 +1077,7 @@ def plot_efficient_frontier(results_data, mu, sigma):
     # Plot algorithm solutions
     risks = []
     returns = []
+    names_list = []
     
     for idx, (name, x, fitness) in enumerate(results_data):
         ret = calculate_return(x, mu)
@@ -1077,6 +1085,7 @@ def plot_efficient_frontier(results_data, mu, sigma):
         
         risks.append(risk)
         returns.append(ret)
+        names_list.append(name)
         
         ax.scatter(risk, ret, s=400, 
                   color=colors[idx % len(colors)],
@@ -1095,20 +1104,58 @@ def plot_efficient_frontier(results_data, mu, sigma):
                                   connectionstyle='arc3,rad=0.3',
                                   color='gray', lw=1.5))
     
-    # Sort solutions by risk for frontier line
+    # Sort solutions by risk for connection line
     sorted_indices = np.argsort(risks)
     sorted_risks = [risks[i] for i in sorted_indices]
     sorted_returns = [returns[i] for i in sorted_indices]
     
-    # Draw approximate efficient frontier
-    ax.plot(sorted_risks, sorted_returns, 'k--', alpha=0.5, 
-           linewidth=2, label='Fronteira Aproximada', zorder=3)
+    # Draw line connecting solutions (sorted by risk)
+    ax.plot(sorted_risks, sorted_returns, 'k--', alpha=0.3, 
+           linewidth=2, label='Conexão por Ordem de Risco', zorder=2)
     
-    # Add reference lines for different return levels
+    # Identify and draw TRUE efficient frontier (upper convex hull)
+    # A solution is on efficient frontier if no other solution dominates it
+    efficient_mask = []
+    for i in range(len(risks)):
+        is_efficient = True
+        for j in range(len(risks)):
+            if i != j:
+                # j dominates i if: same or better return AND less risk
+                if returns[j] >= returns[i] and risks[j] <= risks[i]:
+                    if returns[j] > returns[i] or risks[j] < risks[i]:
+                        is_efficient = False
+                        break
+        efficient_mask.append(is_efficient)
+    
+    # Get efficient solutions
+    efficient_risks = [risks[i] for i in range(len(risks)) if efficient_mask[i]]
+    efficient_returns = [returns[i] for i in range(len(returns)) if efficient_mask[i]]
+    efficient_names = [names_list[i] for i in range(len(names_list)) if efficient_mask[i]]
+    
+    if len(efficient_risks) > 1:
+        # Sort efficient frontier by risk
+        eff_sorted = sorted(zip(efficient_risks, efficient_returns))
+        eff_risks_sorted = [r for r, _ in eff_sorted]
+        eff_returns_sorted = [ret for _, ret in eff_sorted]
+        
+        # Draw TRUE efficient frontier
+        ax.plot(eff_risks_sorted, eff_returns_sorted, 'g-', 
+               linewidth=3.5, alpha=0.6, 
+               label='Fronteira Eficiente (Pareto-Ótima)', zorder=4)
+        
+        # Highlight efficient solutions
+        for i, name in enumerate(names_list):
+            if efficient_mask[i]:
+                # Add a star/crown emoji in annotation
+                ax.scatter(risks[i], returns[i], s=600, 
+                          facecolors='none', edgecolors='gold', 
+                          linewidths=4, zorder=6, alpha=0.8)
+    
+    # Add reference lines for different Sharpe ratios
     if len(risks) > 0:
         min_risk = min(risks)
         max_risk = max(risks)
-        risk_range = np.linspace(min_risk * 0.8, max_risk * 1.2, 100)
+        risk_range = np.linspace(0, max_risk * 1.2, 100)
         
         # Constant Sharpe ratio lines
         for sharpe in [0.5, 1.0, 1.5, 2.0]:
@@ -1116,25 +1163,30 @@ def plot_efficient_frontier(results_data, mu, sigma):
             ax.plot(risk_range, ret_line, ':', alpha=0.2, linewidth=1.5,
                    color='gray')
             # Label at the end
-            ax.text(risk_range[-1], ret_line[-1], f'S={sharpe}',
-                   fontsize=8, alpha=0.5)
+            if ret_line[-1] < max(returns) * 1.3:
+                ax.text(risk_range[-1], ret_line[-1], f'S={sharpe}',
+                       fontsize=8, alpha=0.5)
     
     ax.set_xlabel('Risco (Variância do Portfólio)', 
                  fontweight='bold', fontsize=13)
     ax.set_ylabel('Retorno Esperado Anualizado', 
                  fontweight='bold', fontsize=13)
-    ax.set_title('Fronteira Eficiente Aproximada\n'
-                'Comparação de Soluções no Espaço Risco-Retorno',
+    ax.set_title('Fronteira Eficiente: Soluções Pareto-Ótimas\n'
+                '(Contorno dourado = Na fronteira eficiente)',
                 fontweight='bold', fontsize=16, pad=20)
-    ax.legend(loc='best', frameon=True, shadow=True, fontsize=11)
+    ax.legend(loc='best', frameon=True, shadow=True, fontsize=10)
     ax.grid(True, linestyle='--', alpha=0.4)
     
     # Add info box
-    info_text = (f'Total de soluções: {len(results_data)}\n'
-                f'Melhor Sharpe: {max([r/np.sqrt(risk) for r, risk in zip(returns, risks) if risk > 0]):.3f}\n'
-                f'Linhas pontilhadas: Sharpe Ratio constante')
+    n_efficient = sum(efficient_mask)
+    best_sharpe_idx = np.argmax([r/np.sqrt(risk) for r, risk in zip(returns, risks) if risk > 0])
+    
+    info_text = (f'Soluções na Fronteira Eficiente: {n_efficient}/{len(results_data)}\n'
+                f'Soluções Eficientes: {", ".join(efficient_names)}\n'
+                f'Melhor Sharpe: {names_list[best_sharpe_idx]} '
+                f'({max([r/np.sqrt(risk) for r, risk in zip(returns, risks)]):.3f})')
     ax.text(0.02, 0.98, info_text, transform=ax.transAxes,
-           fontsize=10, verticalalignment='top',
+           fontsize=9, verticalalignment='top',
            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
     
     plt.tight_layout()
@@ -1561,6 +1613,15 @@ if __name__ == "__main__":
         TS_TABU_TENURE = int(n * 0.5) # Lista tabu de 50 (para n=100)
         PSO_MAX_ITER = 150
         PSO_N_PARTICLES = 80
+        
+        # Simulated Annealing Strategy:
+        # aggressive_neighbors=False: Mais conservador, explora melhor o espaço
+        #                             Pode ter melhor posição na fronteira Pareto
+        #                             Usa ~93-97% do budget
+        # aggressive_neighbors=True:  Mais agressivo, usa mais budget
+        #                             Pode ter maior fitness absoluto
+        #                             Usa ~99% do budget
+        SA_AGGRESSIVE = False  # ← MUDE AQUI para experimentar
         # ------------------------------------
         
         print("\n(1/5) A executar Hill Climbing...")
@@ -1570,7 +1631,8 @@ if __name__ == "__main__":
         
         print("\n(2/5) A executar Simulated Annealing...")
         sa_x, sa_fit, sa_hist = simulated_annealing(
-            n, mu, sigma, p, B, k, lambda_val, alpha, beta, max_iter=SA_MAX_ITER
+            n, mu, sigma, p, B, k, lambda_val, alpha, beta, max_iter=SA_MAX_ITER,
+            aggressive_neighbors=SA_AGGRESSIVE
         )
         
         print("\n(3/5) A executar Genetic Algorithm...")
